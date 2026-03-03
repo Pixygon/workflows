@@ -1,0 +1,26 @@
+# Copy this file to your project's .github/workflows/promote-release.yml
+# Then change the values marked with CHANGE below.
+#
+# This workflow is triggered manually to promote builds from
+# internal/TestFlight to production/App Store.
+
+name: Promote Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to promote
+        type: choice
+        options: [both, android, ios]
+        default: both
+
+jobs:
+  promote:
+    uses: Pixygon/workflows/.github/workflows/promote-release.yml@main
+    with:
+      platform: ${{ github.event.inputs.platform }}
+      app-id: com.example.app         # CHANGE: your bundle ID
+      android-from-track: internal
+      android-to-track: production
+    secrets: inherit

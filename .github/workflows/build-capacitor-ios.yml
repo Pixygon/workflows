@@ -1,0 +1,176 @@
+name: Build Capacitor iOS
+
+on:
+  workflow_call:
+    inputs:
+      app-id:
+        description: iOS bundle identifier (e.g. com.wattoshi.app)
+        required: true
+        type: string
+      app-name:
+        description: Human-readable app name
+        required: true
+        type: string
+      scheme:
+        description: Xcode scheme name
+        required: false
+        type: string
+        default: App
+      node-version:
+        description: Node.js version
+        required: false
+        type: string
+        default: '20'
+      build-command:
+        description: Command to build the web app
+        required: false
+        type: string
+        default: npm run build:web
+    secrets:
+      APP_STORE_CONNECT_API_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_API_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_API_KEY_CONTENT:
+        required: true
+      MATCH_PASSWORD:
+        required: true
+      MATCH_GIT_URL:
+        required: true
+      MATCH_GIT_TOKEN:
+        required: true
+      APPLE_TEAM_ID:
+        required: true
+      VITE_BASE_URL:
+        required: false
+
+jobs:
+  build:
+    name: Build iOS
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3 | cut -d- -f1)
+          VERSION_CODE=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+
+      - name: Build web app
+        run: ${{ inputs.build-command }}
+        env:
+          VITE_BASE_URL: ${{ secrets.VITE_BASE_URL }}
+
+      - name: Sync Capacitor
+        run: npx cap sync ios
+
+      - name: Install CocoaPods dependencies
+        working-directory: ios/App
+        run: pod install
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: false
+
+      - name: Install Fastlane
+        run: gem install fastlane
+
+      - name: Create temporary keychain
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> $GITHUB_ENV
+
+      - name: Fastlane Match (fetch certificates)
+        env:
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_KEYCHAIN_NAME: ${{ env.KEYCHAIN_PATH }}
+          MATCH_KEYCHAIN_PASSWORD: ${{ env.KEYCHAIN_PASSWORD }}
+          GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_TOKEN }}
+        run: |
+          fastlane run match \
+            type:"appstore" \
+            app_identifier:"${{ inputs.app-id }}" \
+            git_url:"${{ secrets.MATCH_GIT_URL }}" \
+            keychain_name:"${{ env.KEYCHAIN_PATH }}" \
+            keychain_password:"${{ env.KEYCHAIN_PASSWORD }}" \
+            readonly:true \
+            git_basic_authorization:"$(echo -n '${{ secrets.MATCH_GIT_TOKEN }}' | base64)"
+
+      - name: Set version in Xcode project
+        run: |
+          cd ios/App
+          agvtool new-marketing-version ${{ steps.version.outputs.version }}
+          agvtool new-version -all ${{ steps.version.outputs.version_code }}
+
+      - name: Build and archive
+        run: |
+          fastlane run build_app \
+            workspace:"ios/App/App.xcworkspace" \
+            scheme:"${{ inputs.scheme }}" \
+            configuration:"Release" \
+            export_method:"app-store" \
+            output_directory:"build" \
+            output_name:"${{ inputs.app-name }}.ipa" \
+            clean:true
+
+      - name: Upload to TestFlight
+        run: |
+          # Write API key to file
+          mkdir -p fastlane
+          echo '${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}' | base64 -d > fastlane/AuthKey.p8
+
+          # Create API key JSON for Fastlane
+          cat > fastlane/api_key.json << KEYEOF
+          {
+            "key_id": "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}",
+            "issuer_id": "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}",
+            "key_filepath": "fastlane/AuthKey.p8"
+          }
+          KEYEOF
+
+          fastlane run upload_to_testflight \
+            api_key_path:"fastlane/api_key.json" \
+            ipa:"build/${{ inputs.app-name }}.ipa" \
+            skip_waiting_for_build_processing:true
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: build/${{ inputs.app-name }}.ipa
+          retention-days: 5
+
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true

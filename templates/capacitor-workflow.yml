@@ -1,0 +1,42 @@
+# Copy this file to your project's .github/workflows/build-mobile.yml
+# Then change the 4 values marked with CHANGE below.
+#
+# Prerequisites:
+#   1. npx cap init + npx cap add android + npx cap add ios
+#   2. App registered in App Store Connect and Google Play Console
+#   3. fastlane match appstore -a <your-app-id>
+#   4. Key alias added to Android keystore
+#   5. Org-level secrets configured (see SECRETS_REFERENCE.md)
+
+name: Build Mobile Apps
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build
+        type: choice
+        options: [both, android, ios]
+        default: both
+
+jobs:
+  android:
+    if: github.event_name == 'push' || github.event.inputs.platform != 'ios'
+    uses: Pixygon/workflows/.github/workflows/build-capacitor-android.yml@main
+    with:
+      app-id: com.example.app         # CHANGE: your bundle ID
+      app-name: MyApp                  # CHANGE: your app name
+      android-key-alias: myapp         # CHANGE: your keystore alias
+      upload-to-cdn: true
+      cdn-path: myapp-mobile           # CHANGE: your CDN folder name
+    secrets: inherit
+
+  ios:
+    if: github.event_name == 'push' || github.event.inputs.platform != 'android'
+    uses: Pixygon/workflows/.github/workflows/build-capacitor-ios.yml@main
+    with:
+      app-id: com.example.app         # CHANGE: must match android app-id
+      app-name: MyApp                  # CHANGE: must match android app-name
+    secrets: inherit

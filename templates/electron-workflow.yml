@@ -1,0 +1,24 @@
+# Copy this file to your project's .github/workflows/build-desktop.yml
+# Then change the values marked with CHANGE below.
+#
+# Prerequisites:
+#   1. electron-builder configured in package.json
+#   2. Org-level secrets configured (see SECRETS_REFERENCE.md)
+
+name: Build Desktop App
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    uses: Pixygon/workflows/.github/workflows/build-electron.yml@main
+    with:
+      app-name: MyApp                  # CHANGE: your app name
+      platforms: linux,win,mac
+      upload-to-cdn: true
+      cdn-path: myapp-desktop          # CHANGE: your CDN folder name
+      create-github-release: true
+    secrets: inherit

@@ -1,0 +1,107 @@
+name: Promote Release
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: Platform to promote (ios, android, both)
+        required: true
+        type: string
+      app-id:
+        description: App bundle identifier
+        required: true
+        type: string
+      android-from-track:
+        description: Google Play track to promote from
+        required: false
+        type: string
+        default: internal
+      android-to-track:
+        description: Google Play track to promote to
+        required: false
+        type: string
+        default: production
+    secrets:
+      APP_STORE_CONNECT_API_KEY_ID:
+        required: false
+      APP_STORE_CONNECT_API_ISSUER_ID:
+        required: false
+      APP_STORE_CONNECT_API_KEY_CONTENT:
+        required: false
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON:
+        required: false
+
+jobs:
+  promote-android:
+    name: Promote Android
+    runs-on: ubuntu-latest
+    if: inputs.platform == 'android' || inputs.platform == 'both'
+
+    steps:
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Install Fastlane
+        run: gem install fastlane
+
+      - name: Write Google Play service account key
+        run: echo '${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      - name: Promote on Google Play
+        run: |
+          fastlane run supply \
+            package_name:"${{ inputs.app-id }}" \
+            track:"${{ inputs.android-from-track }}" \
+            track_promote_to:"${{ inputs.android-to-track }}" \
+            json_key:"service-account.json" \
+            skip_upload_metadata:true \
+            skip_upload_images:true \
+            skip_upload_screenshots:true
+
+      - name: Cleanup
+        if: always()
+        run: rm -f service-account.json
+
+  promote-ios:
+    name: Promote iOS to App Store Review
+    runs-on: macos-latest
+    if: inputs.platform == 'ios' || inputs.platform == 'both'
+
+    steps:
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Install Fastlane
+        run: gem install fastlane
+
+      - name: Create API key file
+        run: |
+          mkdir -p fastlane
+          echo '${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}' | base64 -d > fastlane/AuthKey.p8
+          cat > fastlane/api_key.json << EOF
+          {
+            "key_id": "${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}",
+            "issuer_id": "${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}",
+            "key_filepath": "fastlane/AuthKey.p8"
+          }
+          EOF
+
+      - name: Submit for App Store Review
+        run: |
+          fastlane run deliver \
+            api_key_path:"fastlane/api_key.json" \
+            app_identifier:"${{ inputs.app-id }}" \
+            submit_for_review:true \
+            automatic_release:true \
+            skip_metadata:true \
+            skip_screenshots:true \
+            skip_binary_upload:true \
+            force:true
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf fastlane/AuthKey.p8 fastlane/api_key.json

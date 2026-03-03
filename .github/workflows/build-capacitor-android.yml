@@ -1,0 +1,213 @@
+name: Build Capacitor Android
+
+on:
+  workflow_call:
+    inputs:
+      app-id:
+        description: Android application ID (e.g. com.wattoshi.app)
+        required: true
+        type: string
+      app-name:
+        description: Human-readable app name
+        required: true
+        type: string
+      android-key-alias:
+        description: Keystore key alias for this app
+        required: true
+        type: string
+      play-store-track:
+        description: Google Play track to upload to
+        required: false
+        type: string
+        default: internal
+      upload-to-play-store:
+        description: Whether to upload AAB to Google Play
+        required: false
+        type: boolean
+        default: true
+      upload-to-cdn:
+        description: Whether to upload APK to Bunny CDN
+        required: false
+        type: boolean
+        default: false
+      cdn-path:
+        description: CDN upload path prefix (e.g. wattoshi-mobile)
+        required: false
+        type: string
+        default: ''
+      node-version:
+        description: Node.js version
+        required: false
+        type: string
+        default: '20'
+      build-command:
+        description: Command to build the web app
+        required: false
+        type: string
+        default: npm run build:web
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: true
+      ANDROID_KEYSTORE_PASSWORD:
+        required: true
+      ANDROID_KEY_PASSWORD:
+        required: true
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON:
+        required: false
+      BUNNY_API_KEY:
+        required: false
+      BUNNY_STORAGE_ZONE:
+        required: false
+      VITE_BASE_URL:
+        required: false
+
+jobs:
+  build:
+    name: Build Android
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3 | cut -d- -f1)
+          VERSION_CODE=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+
+      - name: Build web app
+        run: ${{ inputs.build-command }}
+        env:
+          VITE_BASE_URL: ${{ secrets.VITE_BASE_URL }}
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Set version in build.gradle
+        run: |
+          sed -i "s/versionCode [0-9]*/versionCode ${{ steps.version.outputs.version_code }}/" android/app/build.gradle
+          sed -i "s/versionName \"[^\"]*\"/versionName \"${{ steps.version.outputs.version }}\"/" android/app/build.gradle
+
+      - name: Build Android AAB (for Play Store)
+        working-directory: android
+        run: ./gradlew bundleRelease
+
+      - name: Build Android APK (for CDN/direct install)
+        if: inputs.upload-to-cdn
+        working-directory: android
+        run: ./gradlew assembleRelease
+
+      - name: Sign AAB
+        uses: r0adkll/sign-android-release@v1
+        id: sign-aab
+        with:
+          releaseDirectory: android/app/build/outputs/bundle/release
+          signingKeyBase64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          alias: ${{ inputs.android-key-alias }}
+          keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Sign APK
+        if: inputs.upload-to-cdn
+        uses: r0adkll/sign-android-release@v1
+        id: sign-apk
+        with:
+          releaseDirectory: android/app/build/outputs/apk/release
+          signingKeyBase64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          alias: ${{ inputs.android-key-alias }}
+          keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab
+          path: android/app/build/outputs/bundle/release/*.aab
+          retention-days: 5
+
+      - name: Upload APK artifact
+        if: inputs.upload-to-cdn
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: android/app/build/outputs/apk/release/*-signed.apk
+          retention-days: 5
+
+      - name: Upload to Google Play
+        if: inputs.upload-to-play-store && secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON != ''
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ inputs.app-id }}
+          releaseFiles: android/app/build/outputs/bundle/release/*.aab
+          track: ${{ inputs.play-store-track }}
+          status: completed
+
+  upload-cdn:
+    name: Upload to CDN
+    needs: build
+    runs-on: ubuntu-latest
+    if: inputs.upload-to-cdn && inputs.cdn-path != ''
+
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: artifacts/android
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Upload to Bunny.net CDN
+        env:
+          BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
+          BUNNY_STORAGE_ZONE: ${{ secrets.BUNNY_STORAGE_ZONE }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          UPLOAD_PATH="${{ inputs.cdn-path }}/v${VERSION}"
+          LATEST_PATH="${{ inputs.cdn-path }}/latest"
+
+          for file in artifacts/android/*.apk; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              echo "Uploading $filename..."
+              for path in "$UPLOAD_PATH" "$LATEST_PATH"; do
+                curl -s -w "\n" -X PUT \
+                  "https://se.storage.bunnycdn.com/${BUNNY_STORAGE_ZONE}/${path}/${filename}" \
+                  -H "AccessKey: ${BUNNY_API_KEY}" \
+                  -H "Content-Type: application/vnd.android.package-archive" \
+                  --data-binary "@${file}"
+              done
+            fi
+          done
+          echo "Upload complete!"
