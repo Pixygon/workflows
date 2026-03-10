@@ -162,8 +162,10 @@ jobs:
           retention-days: 5
 
       - name: Upload to Google Play
-        if: inputs.upload-to-play-store && secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON != ''
+        if: inputs.upload-to-play-store && env.PLAY_SA_JSON != ''
         uses: r0adkll/upload-google-play@v1
+        env:
+          PLAY_SA_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
         with:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: ${{ inputs.app-id }}
