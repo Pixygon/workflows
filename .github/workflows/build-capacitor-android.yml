@@ -39,7 +39,7 @@ on:
         description: Node.js version
         required: false
         type: string
-        default: '20'
+        default: '22'
       build-command:
         description: Command to build the web app
         required: false
